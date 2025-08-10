@@ -1,24 +1,224 @@
 #!/usr/bin/env node
 
+async function selectBranch() {
+    // Get current branch
+    const currentBranch = exec('git rev-parse --abbrev-ref HEAD');
+
+    // Get recent branches (last 10 branches you've checked out)
+    const recentBranches = exec('git reflog show --pretty=format:"%gs" --grep-reflog="checkout" | grep -oE "[^ ]+$" | grep -v "^HEAD$" | awk "!seen[$0]++" | head -10')
+        .split('\n')
+        .filter(b => b && b !== currentBranch);
+
+    // Get all branches
+    const remoteBranches = exec('git branch -r')
+        .split('\n')
+        .map(b => b.trim())
+        .filter(b => b && !b.includes('->') && !b.includes('HEAD'))
+        .map(b => b.replace('origin/', ''));
+
+    const localBranches = exec('git branch')
+        .split('\n')
+        .map(b => b.trim().replace('* ', ''))
+        .filter(b => b && b !== currentBranch);
+
+    // Combine branches in order: master/main first, then recent, then others
+    const priorityBranches = ['master', 'main'];
+    const defaultBranch = priorityBranches.find(b =>
+        localBranches.includes(b) || remoteBranches.includes(b)
+    ) || 'master';
+
+    // Build ordered list
+    const allBranches = [...new Set([...localBranches, ...remoteBranches])];
+    const otherBranches = allBranches
+        .filter(b => !priorityBranches.includes(b) && !recentBranches.includes(b))
+        .sort();
+
+    const fullBranchList = [
+        defaultBranch,
+        ...recentBranches.filter(b => b !== defaultBranch && allBranches.includes(b)),
+        ...otherBranches
+    ].filter((b, i, arr) => arr.indexOf(b) === i); // Remove duplicates
+
+    // Interactive selection with keyboard and search
+    let selectedIndex = 0;
+    let searchQuery = '';
+    let filteredBranches = fullBranchList;
+    const maxDisplay = 10; // Max branches to display at once
+    let scrollOffset = 0;
+
+    // Set up keyboard input
+    readline.emitKeypressEvents(process.stdin);
+    if (process.stdin.isTTY) {
+        process.stdin.setRawMode(true);
+    }
+
+    const filterBranches = (query) => {
+        if (!query) return fullBranchList;
+
+        const lowerQuery = query.toLowerCase();
+
+        // Score branches based on match quality
+        const scored = fullBranchList.map(branch => {
+            const lowerBranch = branch.toLowerCase();
+            let score = 0;
+
+            // Exact match
+            if (lowerBranch === lowerQuery) score = 1000;
+            // Starts with query
+            else if (lowerBranch.startsWith(lowerQuery)) score = 100;
+            // Contains query at word boundary
+            else if (lowerBranch.split(/[/-]/).some(part => part.startsWith(lowerQuery))) score = 50;
+            // Contains query
+            else if (lowerBranch.includes(lowerQuery)) score = 10;
+            // Fuzzy match (each character in order)
+            else {
+                let queryIndex = 0;
+                for (let i = 0; i < lowerBranch.length && queryIndex < lowerQuery.length; i++) {
+                    if (lowerBranch[i] === lowerQuery[queryIndex]) {
+                        queryIndex++;
+                        score += 1;
+                    }
+                }
+                if (queryIndex !== lowerQuery.length) score = 0;
+            }
+
+            return { branch, score };
+        });
+
+        return scored
+            .filter(item => item.score > 0)
+            .sort((a, b) => b.score - a.score)
+            .map(item => item.branch);
+    };
+
+    const displayBranches = () => {
+        // Clear previous display
+        process.stdout.write('\x1B[2J\x1B[0f');
+
+        console.log('\n🔍 Search and select branch to compare against:');
+        console.log('   (Type to search, ↑↓ to navigate, Enter to select, Esc to clear, q to quit)\n');
+
+        // Show search query
+        const searchDisplay = searchQuery ? `🔎 Search: ${searchQuery}_` : '🔎 Type to search...';
+        console.log(`   ${searchDisplay}\n`);
+
+        // Update filtered branches
+        filteredBranches = filterBranches(searchQuery);
+
+        if (filteredBranches.length === 0) {
+            console.log('   No branches match your search');
+            return;
+        }
+
+        // Adjust selected index if needed
+        if (selectedIndex >= filteredBranches.length) {
+            selectedIndex = 0;
+            scrollOffset = 0;
+        }
+
+        const start = scrollOffset;
+        const end = Math.min(start + maxDisplay, filteredBranches.length);
+
+        for (let i = start; i < end; i++) {
+            const branch = filteredBranches[i];
+            const isSelected = i === selectedIndex;
+            const prefix = isSelected ? '▶ ' : '  ';
+            const highlight = isSelected ? '\x1b[36m' : ''; // Cyan color
+            const reset = isSelected ? '\x1b[0m' : '';
+
+            let label = '';
+            if (branch === defaultBranch) {
+                label = ' \x1b[33m(default)\x1b[0m';
+            } else if (recentBranches.includes(branch) && branch !== defaultBranch) {
+                label = ' \x1b[32m(recent)\x1b[0m';
+            }
+
+            // Highlight matching parts in branch name
+            let displayName = branch;
+            if (searchQuery) {
+                const regex = new RegExp(`(${searchQuery.split('').join('.*?')})`, 'gi');
+                displayName = branch.replace(regex, '\x1b[33m$1\x1b[0m');
+            }
+
+            console.log(`${prefix}${highlight}${isSelected ? branch : displayName}${label}${reset}`);
+        }
+
+        if (filteredBranches.length > maxDisplay) {
+            console.log(`\n   Showing ${start + 1}-${end} of ${filteredBranches.length} matches (${fullBranchList.length} total)`);
+        }
+    };
+
+    return new Promise((resolve) => {
+        displayBranches();
+
+        const handleKeypress = (str, key) => {
+            if (key && key.name === 'up') {
+                selectedIndex = Math.max(0, selectedIndex - 1);
+                if (selectedIndex < scrollOffset) {
+                    scrollOffset = selectedIndex;
+                }
+                displayBranches();
+            } else if (key && key.name === 'down') {
+                selectedIndex = Math.min(filteredBranches.length - 1, selectedIndex + 1);
+                if (selectedIndex >= scrollOffset + maxDisplay) {
+                    scrollOffset = selectedIndex - maxDisplay + 1;
+                }
+                displayBranches();
+            } else if (key && key.name === 'return') {
+                if (filteredBranches.length === 0) return;
+
+                process.stdin.setRawMode(false);
+                process.stdin.removeListener('keypress', handleKeypress);
+                process.stdin.pause();
+
+                const selected = filteredBranches[selectedIndex];
+                const fullBranch = localBranches.includes(selected) ? selected : `origin/${selected}`;
+                console.log(`\n✅ Selected: ${fullBranch}`);
+                resolve(fullBranch);
+            } else if (key && key.name === 'escape') {
+                searchQuery = '';
+                selectedIndex = 0;
+                scrollOffset = 0;
+                displayBranches();
+            } else if (key && (key.name === 'q' || (key.ctrl && key.name === 'c'))) {
+                process.stdin.setRawMode(false);
+                process.stdin.removeListener('keypress', handleKeypress);
+                process.stdin.pause();
+                console.log('\n❌ Cancelled');
+                process.exit(0);
+            } else if (key && key.name === 'backspace') {
+                searchQuery = searchQuery.slice(0, -1);
+                selectedIndex = 0;
+                scrollOffset = 0;
+                displayBranches();
+            } else if (str && !key.ctrl && !key.meta) {
+                searchQuery += str;
+                selectedIndex = 0;
+                scrollOffset = 0;
+                displayBranches();
+            }
+        };
+
+        process.stdin.on('keypress', handleKeypress);
+        process.stdin.resume();
+    });
+}
+
 /**
  * 📝 AI Changelog Generator
- *
- * Minimal setup - just drop this file in your repo and run:
- *
  * 1. Get Claude API key: https://console.anthropic.com/settings/keys
  * 2. export ANTHROPIC_API_KEY="your-key-here"
- * 3. node changelog.mjs --dry-run
+ * 3. node changelog.mjs --dry
  *
  * Usage:
  *   node changelog.mjs                           # Generate for recent changes
- *   node changelog.mjs --dry-run                 # Preview only
- *   node changelog.mjs --range HEAD~5..HEAD     # Specific range
- *   node changelog.mjs --install-hook           # Install git pre-push hook
+ *   node changelog.mjs --dry                 # Preview only
  */
 
 import { execSync } from 'child_process';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { dirname } from 'path';
+import readline from 'readline';
 
 // =============================================================================
 // 🔧 MINIMAL CONFIGURATION (edit as needed)
@@ -281,14 +481,14 @@ function renderMarkdown(entries, baseBranch) {
 
     // Define category order
     const categoryOrder = [
-        'New Features', '🚀 Features', 'Features',
-        'Component Enhancements', 'New Components',
-        'Improvements', '🔧 Improvements',
-        'Bug Fixes', '🐛 Bug Fixes',
-        'Performance Optimizations',
-        'Refactoring', '🔄 Refactoring',
-        'Documentation', '📝 Documentation',
-        'Testing', 'Test Improvements'
+        '✨ New Features', '🚀 Features', '🚀 Features',
+        '🧩 Component Enhancements', '🆕 New Components',
+        '🔧 Improvements', '🔧 Improvements',
+        '🐛 Bug Fixes', '🐛 Bug Fixes',
+        '⚡ Performance Optimizations',
+        '🔄 Refactoring', '🔄 Refactoring',
+        '📝 Documentation', '📝 Documentation',
+        '🧪 Testing', '🧪 Test Improvements'
     ];
 
     // Add other categories in order
@@ -366,7 +566,7 @@ function getDefaultCategory(type) {
         'improve': '🔧 Improvements',
         'refactor': '🔄 Refactoring',
         'docs': '📝 Documentation',
-        'test': 'Test Improvements',
+        'test': '🧪Test Improvements',
         'breaking': '⚠️ BREAKING CHANGES'
     };
     return categoryMap[type] || 'Other Changes';
@@ -424,39 +624,6 @@ function writeOutput(content, baseBranch) {
     }
 }
 
-function installHook() {
-    const hookPath = '.git/hooks/pre-push';
-    const hookContent = `#!/bin/bash
-# Auto-changelog pre-push hook
-set -e
-
-if [ ! -f "changelog.mjs" ]; then
-  echo "⚠️  changelog.mjs not found, skipping"
-  exit 0
-fi
-
-if [ -z "$ANTHROPIC_API_KEY" ]; then
-  echo "⚠️  ANTHROPIC_API_KEY not set, skipping changelog"
-  exit 0
-fi
-
-echo "🤖 Generating changelog..."
-if node changelog.mjs; then
-  echo "✅ Changelog updated"
-else
-  echo "❌ Changelog generation failed - push blocked"
-  echo "   Use 'git push --no-verify' to skip"
-  exit 1
-fi
-`;
-
-    writeFileSync(hookPath, hookContent);
-    exec('chmod +x .git/hooks/pre-push');
-    console.log('✅ Git pre-push hook installed');
-    console.log('   Will run automatically on git push');
-    console.log('   Bypass with: git push --no-verify');
-}
-
 // =============================================================================
 // 🚀 MAIN
 // =============================================================================
@@ -470,11 +637,6 @@ async function main() {
         CONFIG.baseBranch = args[baseFlag + 1];
     }
 
-    // Handle flags
-    if (args.includes('--install-hook')) {
-        return installHook();
-    }
-
     if (args.includes('--help') || args.includes('-h')) {
         console.log(`
 🤖 AI Changelog Generator (Claude Edition)
@@ -484,13 +646,14 @@ Setup:
   2. export ANTHROPIC_API_KEY="your-key"
 
 Usage:
-  node changelog.mjs                    Generate changelog (compare to main)
-  node changelog.mjs --dry-run          Preview only
-  node changelog.mjs --base origin/dev  Compare against specific branch
+  node changelog.mjs                    Generate changelog (interactive branch selection)
+  node changelog.mjs --dry          Preview only (interactive branch selection)
+  node changelog.mjs --base origin/dev  Compare against specific branch (skip selection)
   node changelog.mjs --range A..B       Specific git range
   node changelog.mjs --install-hook     Install git hook
 
 Examples:
+  node changelog.mjs                           # Select branch interactively
   node changelog.mjs --base origin/develop     # Compare to develop branch
   node changelog.mjs --base origin/staging     # Compare to staging branch
   node changelog.mjs --base feature/other      # Compare to another feature
@@ -507,13 +670,19 @@ Model: ${CONFIG.model}
         return;
     }
 
-    const isDryRun = args.includes('--dry-run');
+    const isDryRun = args.includes('--dry');
 
     try {
         const currentBranch = exec('git rev-parse --abbrev-ref HEAD');
+
+        // Interactive branch selection if no --base flag provided
+        if (!CONFIG.baseBranch && !args.includes('--range')) {
+            CONFIG.baseBranch = await selectBranch();
+        }
+
         const baseBranch = CONFIG.baseBranch || 'origin/main';
 
-        console.log(`🌳 Current branch: ${currentBranch}`);
+        console.log(`\n🌳 Current branch: ${currentBranch}`);
         console.log(`🎯 Comparing against: ${baseBranch}`);
         console.log('🔍 Analyzing changes...');
 
