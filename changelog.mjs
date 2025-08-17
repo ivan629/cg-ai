@@ -1,5 +1,17 @@
-
-
+// Simple env loader
+function loadEnvFile(path = '.env') {
+    if (!existsSync(path)) return;
+    const content = readFileSync(path, 'utf8');
+    content.split('\n').forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) return;
+        const [key, ...vals] = trimmed.split('=');
+        if (key && vals.length) {
+            process.env[key.trim()] = vals.join('=').trim();
+        }
+    });
+}
+loadEnvFile();
 /**
  * 🚀 AI-Powered Changelog Generator
  *
@@ -42,7 +54,7 @@ const CONFIG = {
     output: {
         file: 'CHANGELOG.md',  // Standard name
         appendToExisting: true,
-        shouldIncureaseVersion: false
+        shouldIncureaseVersion: true
     },
 
     // Safety features
@@ -297,7 +309,7 @@ class GitOperations {
         // Cache recent branches to avoid repeated git calls
         if (!this._recentBranchesCache) {
             const command = `git reflog show --pretty=format:"%gs" --grep-reflog="checkout" | ` +
-                           `grep -oE "[^ ]+$" | grep -v "^HEAD$" | awk "!seen[$0]++" | head -${limit}`;
+                `grep -oE "[^ ]+$" | grep -v "^HEAD$" | awk "!seen[$0]++" | head -${limit}`;
 
             const currentBranch = this.getCurrentBranch();
             this._recentBranchesCache = executeCommand(command)
@@ -368,29 +380,15 @@ class GitOperations {
      * @returns {string} Formatted diff
      */
     static getFileDiff(range, file) {
-        const diff = executeCommand(`git diff ${range} -- "${file}"`);
-        const lines = diff.split('\n');
-        const relevantLines = [];
-        let inHunk = false;
-        let hunkCount = 0;
-        const maxHunks = 3;
-
-        for (const line of lines) {
-            if (line.startsWith('@@')) {
-                if (hunkCount >= maxHunks) break;
-                hunkCount++;
-                inHunk = true;
-                relevantLines.push(line);
-            } else if (inHunk && (line.startsWith('+') || line.startsWith('-'))) {
-                relevantLines.push(line);
-            } else if (inHunk && line === '') {
-                relevantLines.push(line);
-            } else if (!line.startsWith(' ')) {
-                inHunk = false;
-            }
+        try {
+            // Get the complete diff for the file
+            const diff = executeCommand(`git diff ${range} -- "${file}"`);
+            console.log('diff_NEW', diff)
+            return diff;
+        } catch (error) {
+            console.error(`Error getting diff for ${file}:`, error.message);
+            return '';
         }
-
-        return relevantLines.join('\n');
     }
 
     /**
@@ -1155,8 +1153,8 @@ class ChangelogFormatter {
             } else {
                 // Otherwise just show as code
                 metadata += ` \`${entry.ticketId}\``;
-    }
-    }
+            }
+        }
 
         return metadata;
     }
@@ -1201,31 +1199,6 @@ class ChangelogFormatter {
  * Handles file analysis and filtering
  */
 class FileAnalyzer {
-    /**
-     * Check if file should be ignored
-     * @param {string} file - File path
-     * @returns {boolean} Should ignore
-     */
-    shouldIgnore(file) {
-        // First check gitignore patterns
-        const patterns = CONFIG.ignorePatterns.length > 0
-            ? CONFIG.ignorePatterns
-            : ConfigAutoDetector.loadGitignorePatterns();
-
-        return patterns.some(pattern => {
-            if (pattern.endsWith('/')) {
-                return file.startsWith(pattern);
-            }
-
-            if (pattern.includes('*')) {
-                const regex = new RegExp(pattern.replace(/\*/g, '.*'));
-                return regex.test(file);
-            }
-
-            return file.includes(pattern) || file.endsWith(pattern);
-        });
-    }
-
     /**
      * Get scope for a file based on its path
      * Auto-detects from file path structure
@@ -1522,35 +1495,6 @@ BREAKING CHANGES:
     }
 
     /**
-     * Check for breaking changes
-     * @param {Array} entries - Changelog entries
-     * @returns {boolean} Has breaking changes
-     */
-    checkBreakingChanges(entries) {
-        const breakingChanges = entries.filter(e => e.type === 'breaking');
-
-        if (breakingChanges.length === 0) return false;
-
-        if (CONFIG.safety.blockBreakingChanges && !process.env.BREAKING_OK) {
-            console.log('\n💥 BREAKING CHANGES DETECTED:\n');
-
-            breakingChanges.forEach(entry => {
-                console.log(`   - ${entry.scope}: ${entry.description}`);
-            });
-
-            console.log('\n❌ Push blocked due to breaking changes.\n');
-            console.log('📝 To override and continue:');
-            console.log('   • For this run: BREAKING_OK=1 node changelog.mjs');
-            console.log('   • For git push: BREAKING_OK=1 git push');
-            console.log('   • Disable permanently in CONFIG\n');
-
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
      * Run the changelog generator
      * @param {Array} args - Command line arguments
      */
@@ -1588,11 +1532,10 @@ BREAKING CHANGES:
 
             // Get changed files
             const allFiles = GitOperations.getChangedFiles(range);
-            const relevantFiles = allFiles.filter(file => !this.fileAnalyzer.shouldIgnore(file));
 
-            log(`Files: ${allFiles.length} total, ${relevantFiles.length} relevant`, '📊');
+            log(`Files: ${allFiles.length} total`, '📊');
 
-            if (!relevantFiles.length) {
+            if (!allFiles.length) {
                 logSuccess('No relevant changes found');
                 return;
             }
@@ -1617,11 +1560,12 @@ BREAKING CHANGES:
             }
 
             // Analyze changes
-            const changes = this.fileAnalyzer.analyzeChanges(range, relevantFiles);
+            const changes = this.fileAnalyzer.analyzeChanges(range, allFiles);
 
             // Generate changelog with AI
             log('Calling Claude AI...', '🤖');
             const aiGenerator = new AIChangelogGenerator(apiKey);
+
             const result = await aiGenerator.generateChangelog(changes);
 
             if (!result.entries?.length) {
@@ -1630,11 +1574,6 @@ BREAKING CHANGES:
             }
 
             log(`Generated ${result.entries.length} entries`, '📝');
-
-            // Check for breaking changes
-            if (this.checkBreakingChanges(result.entries)) {
-                process.exit(1);
-            }
 
             // Format changelog
             const markdown = this.formatter.formatMarkdown(result.entries, baseBranch);
