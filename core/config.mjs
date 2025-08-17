@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
 
+const USER_CONFIG_FILENAME = 'ch-ai.json'
+
 const DEFAULT_CONFIG = {
     ai: {
         provider: 'anthropic', // 'anthropic' | 'openai' | 'gemini' | 'cohere'
@@ -24,7 +26,7 @@ export async function loadConfig() {
 
     // Try multiple config file locations
     const configPaths = [
-        resolve(process.cwd(), 'ch-ai.config.json'),
+        resolve(process.cwd(), USER_CONFIG_FILENAME),
     ];
 
     for (const configPath of configPaths) {
