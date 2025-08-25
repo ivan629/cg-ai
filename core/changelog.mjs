@@ -1,6 +1,6 @@
 import { loadConfig } from './config.mjs';
 import { git, selectBranch } from './git-ops.mjs';
-import { generateChangelog } from './ai-client.mjs';
+import { generateChangelogGemini, generateChangelogAnthropic } from './ai-client.mjs';
 import { formatChangelog, writeChangelog } from './changelog-formatter.mjs';
 import {
   formatChangesetContent,
@@ -37,10 +37,11 @@ USAGE:
   node changelog.mjs [options]
 
 OPTIONS:
-  --dry              Preview without writing
-  --base <branch>    Compare against branch
-  --changeset        Write to newest changeset file
-  --help             Show this help
+  --dry                Preview without writing
+  --base <branch>      Compare against branch
+  --changeset          Write to newest changeset file
+  --provider <name>    Override provider (anthropic | gemini)
+  --help               Show this help
 
 CONFIG:
   Create changelog.config.js to customize
@@ -52,9 +53,19 @@ CONFIG:
     // Load config
     const config = await loadConfig();
 
+    // Override provider if passed from CLI
+    const providerArgIndex = args.indexOf('--provider');
+    if (providerArgIndex !== -1 && args[providerArgIndex + 1]) {
+      config.ai.provider = args[providerArgIndex + 1];
+    }
+
     // Check API key
-    if (!process.env.ANTHROPIC_API_KEY) {
+    if (config.ai.provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) {
       console.error('❌ Set ANTHROPIC_API_KEY environment variable');
+      process.exit(1);
+    }
+    if (config.ai.provider === 'gemini' && !process.env.GEMINI_API_KEY) {
+      console.error('❌ Set GEMINI_API_KEY environment variable');
       process.exit(1);
     }
 
@@ -88,18 +99,26 @@ CONFIG:
       })
       .join('\n\n---\n\n');
 
-    // Generate with AI
     console.log('🤖 Generating changelog...');
-    const result = await generateChangelog(changes, config);
 
-    if (!result.entries?.length) {
+    let result = null;
+    if (config.ai.provider === 'gemini') {
+      console.log('ℹ️ Using Gemini provider...');
+      result = await generateChangelogGemini(changes, config);
+    } else if (config.ai.provider === 'anthropic') {
+      console.log('ℹ️ Using Anthropic provider...');
+      result = await generateChangelogAnthropic(changes, config);
+    } else {
+      throw new Error(`Unknown provider: ${config.ai.provider}`);
+    }
+
+    if (!result?.entries?.length) {
       console.log('ℹ️  No user-facing changes detected');
       return;
     }
 
-    // Format output based on mode
+    // Format output
     let changelog;
-
     if (useChangeset) {
       changelog = formatChangesetContent(result);
     } else {
@@ -109,10 +128,12 @@ CONFIG:
     if (!isDryRun) {
       if (useChangeset) {
         writeChangeset(changelog);
-          console.log('\n✅ Good job, now you can go to check the changeset and push your MR');
+        console.log(
+          '\n✅ Good job, now you can check the changeset and push your MR',
+        );
       } else {
         writeChangelog(changelog, config);
-          console.log('\n🏃 DRY RUN - no files written');
+        console.log('\n✅ Changelog written');
       }
     } else {
       console.log('\n🏃 DRY RUN - no files written');
