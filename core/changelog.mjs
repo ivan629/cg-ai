@@ -3,34 +3,34 @@ import { git, selectBranch } from './git-ops.mjs';
 import { generateChangelogGemini, generateChangelogAnthropic } from './ai-client.mjs';
 import { formatChangelog, writeChangelog } from './changelog-formatter.mjs';
 import {
-  formatChangesetContent,
-  writeChangeset,
+    formatChangesetContent,
+    writeChangeset,
 } from './changeset-formatter.mjs';
 import { existsSync, readFileSync } from 'fs';
 
 // Load env file
 if (existsSync('.env')) {
-  readFileSync('.env', 'utf8')
-    .split('\n')
-    .forEach(line => {
-      const trimmed = line.trim();
-      if (trimmed && !trimmed.startsWith('#')) {
-        const [key, ...vals] = trimmed.split('=');
-        if (key && vals.length) {
-          process.env[key.trim()] = vals.join('=').trim();
-        }
-      }
-    });
+    readFileSync('.env', 'utf8')
+        .split('\n')
+        .forEach(line => {
+            const trimmed = line.trim();
+            if (trimmed && !trimmed.startsWith('#')) {
+                const [key, ...vals] = trimmed.split('=');
+                if (key && vals.length) {
+                    process.env[key.trim()] = vals.join('=').trim();
+                }
+            }
+        });
 }
 
 export async function main() {
-  const args = process.argv.slice(2);
-  const isDryRun = args.includes('--dry');
-  const useChangeset = args.includes('--changeset');
+    const args = process.argv.slice(2);
+    const isDryRun = args.includes('--dry');
+    const useChangeset = args.includes('--changeset');
 
-  // Show help
-  if (args.includes('--help')) {
-    console.log(`
+    // Show help
+    if (args.includes('--help')) {
+        console.log(`
 🚀 AI Changelog Generator
 
 USAGE:
@@ -46,101 +46,101 @@ OPTIONS:
 CONFIG:
   Create changelog.config.js to customize
 `);
-    return;
-  }
-
-  try {
-    // Load config
-    const config = await loadConfig();
-
-    // Override provider if passed from CLI
-    const providerArgIndex = args.indexOf('--provider');
-    if (providerArgIndex !== -1 && args[providerArgIndex + 1]) {
-      config.ai.provider = args[providerArgIndex + 1];
+        return;
     }
 
-    // Check API key
-    if (config.ai.provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) {
-      console.error('❌ Set ANTHROPIC_API_KEY environment variable');
-      process.exit(1);
+    try {
+        // Load config
+        const config = await loadConfig();
+
+        // Override provider if passed from CLI
+        const providerArgIndex = args.indexOf('--provider');
+        if (providerArgIndex !== -1 && args[providerArgIndex + 1]) {
+            config.ai.provider = args[providerArgIndex + 1];
+        }
+
+        // Check API key
+        if (config.ai.provider === 'anthropic' && !process.env.ANTHROPIC_API_KEY) {
+            console.error('❌ Set ANTHROPIC_API_KEY environment variable');
+            process.exit(1);
+        }
+        if (config.ai.provider === 'gemini' && !process.env.GEMINI_API_KEY) {
+            console.error('❌ Set GEMINI_API_KEY environment variable');
+            process.exit(1);
+        }
+
+        // Get base branch
+        let baseBranch = args.includes('--base')
+            ? args[args.indexOf('--base') + 1]
+            : await selectBranch();
+
+        const range = `${baseBranch}..HEAD`;
+        console.log(`\n🔍 Analyzing ${range}...`);
+
+        // Get changes
+        const files = git.getChangedFiles(range);
+        if (!files.length) {
+            console.log('✅ No changes found');
+            return;
+        }
+
+        // Build changes text
+        const changes = files
+            .map(file => {
+                const scope = file.split('/')[0]; // Simple scope detection
+                return [
+                    `FILE: ${file}`,
+                    `SCOPE: ${scope}`,
+                    `COMMITS:`,
+                    git.getFileCommits(range, file),
+                    `CHANGES:`,
+                    git.getFileDiff(range, file),
+                ].join('\n');
+            })
+            .join('\n\n---\n\n');
+
+        console.log('🤖 Generating changelog...');
+
+        let result = null;
+        if (config.ai.provider === 'gemini') {
+            console.log('ℹ️ Using Gemini provider...');
+            result = await generateChangelogGemini(changes, config);
+        } else if (config.ai.provider === 'anthropic') {
+            console.log('ℹ️ Using Anthropic provider...');
+            result = await generateChangelogAnthropic(changes, config);
+        } else {
+            throw new Error(`Unknown provider: ${config.ai.provider}`);
+        }
+
+        if (!result?.entries?.length) {
+            console.log('ℹ️  No user-facing changes detected');
+            return;
+        }
+
+        // Format output
+        let changelog;
+        if (useChangeset) {
+            changelog = formatChangesetContent(result);
+        } else {
+            changelog = formatChangelog(result.entries, config);
+        }
+
+        if (!isDryRun) {
+            if (useChangeset) {
+                writeChangeset(changelog);
+                console.log(
+                    '\n✅ Good job, now you can check the changeset and push your MR',
+                );
+            } else {
+                writeChangelog(changelog, config);
+                console.log('\n✅ Changelog written');
+            }
+        } else {
+            console.log('\n🏃 DRY RUN - no files written');
+        }
+    } catch (error) {
+        console.error('❌ Error:', error.message);
+        if (process.env.DEBUG) console.error(error);
+        process.exit(1);
     }
-    if (config.ai.provider === 'gemini' && !process.env.GEMINI_API_KEY) {
-      console.error('❌ Set GEMINI_API_KEY environment variable');
-      process.exit(1);
-    }
-
-    // Get base branch
-    let baseBranch = args.includes('--base')
-      ? args[args.indexOf('--base') + 1]
-      : await selectBranch();
-
-    const range = `${baseBranch}..HEAD`;
-    console.log(`\n🔍 Analyzing ${range}...`);
-
-    // Get changes
-    const files = git.getChangedFiles(range);
-    if (!files.length) {
-      console.log('✅ No changes found');
-      return;
-    }
-
-    // Build changes text
-    const changes = files
-      .map(file => {
-        const scope = file.split('/')[0]; // Simple scope detection
-        return [
-          `FILE: ${file}`,
-          `SCOPE: ${scope}`,
-          `COMMITS:`,
-          git.getFileCommits(range, file),
-          `CHANGES:`,
-          git.getFileDiff(range, file),
-        ].join('\n');
-      })
-      .join('\n\n---\n\n');
-
-    console.log('🤖 Generating changelog...');
-
-    let result = null;
-    if (config.ai.provider === 'gemini') {
-      console.log('ℹ️ Using Gemini provider...');
-      result = await generateChangelogGemini(changes, config);
-    } else if (config.ai.provider === 'anthropic') {
-      console.log('ℹ️ Using Anthropic provider...');
-      result = await generateChangelogAnthropic(changes, config);
-    } else {
-      throw new Error(`Unknown provider: ${config.ai.provider}`);
-    }
-
-    if (!result?.entries?.length) {
-      console.log('ℹ️  No user-facing changes detected');
-      return;
-    }
-
-    // Format output
-    let changelog;
-    if (useChangeset) {
-      changelog = formatChangesetContent(result);
-    } else {
-      changelog = formatChangelog(result.entries, config);
-    }
-
-    if (!isDryRun) {
-      if (useChangeset) {
-        writeChangeset(changelog);
-        console.log(
-          '\n✅ Good job, now you can check the changeset and push your MR',
-        );
-      } else {
-        writeChangelog(changelog, config);
-        console.log('\n✅ Changelog written');
-      }
-    } else {
-      console.log('\n🏃 DRY RUN - no files written');
-    }
-  } catch (error) {
-    console.error('❌ Error:', error.message);
-    if (process.env.DEBUG) console.error(error);
-    process.exit(1);
-  }
 }
